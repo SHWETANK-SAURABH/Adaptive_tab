@@ -25,9 +25,14 @@ function makeChrome(tabs: ReturnType<typeof makeTab>[], storage: Record<string, 
   const startup = makeEvent();
   const message = makeEvent();
   const data = new Map(Object.entries(storage));
+  const alarms = new Map<string, { name: string; periodInMinutes?: number }>();
   const api = {
     runtime: { onInstalled: installed, onStartup: startup, onMessage: message },
-    alarms: { create: vi.fn(), onAlarm: alarmEvent },
+    alarms: {
+      create: vi.fn(async (name: string, info: { periodInMinutes?: number }) => { alarms.set(name, { name, ...info }); }),
+      get: vi.fn(async (name: string) => alarms.get(name)),
+      onAlarm: alarmEvent
+    },
     storage: { local: {
       get: vi.fn(async (key: string) => ({ [key]: copy(data.get(key)) })),
       set: vi.fn(async (values: Record<string, unknown>) => { for (const [key, value] of Object.entries(values)) data.set(key, copy(value)); })
@@ -47,7 +52,7 @@ function makeChrome(tabs: ReturnType<typeof makeTab>[], storage: Record<string, 
       update: vi.fn(async (id: number, changes: { active?: boolean }) => { const found = tabs.find(tab => tab.id === id); if (!found) throw new Error('No tab'); if (changes.active) { for (const tab of tabs) tab.active = false; found.active = true; } return copy(found); })
     }
   };
-  return { api, tabs, data, message, tabActivated, tabUpdated, tabRemoved, installed, startup };
+  return { api, tabs, data, alarms, message, tabActivated, tabUpdated, tabRemoved, installed, startup };
 }
 
 async function flush() { for (let i = 0; i < 5; i++) await new Promise(resolve => setTimeout(resolve, 0)); }
@@ -170,6 +175,55 @@ describe('service worker integration', () => {
     expect(env.api.tabs.remove).toHaveBeenCalledWith(3);
     const state = (await send({ type: 'GET_STATE' })).state;
     expect(state.events.some((e: { type: string; message: string }) => e.type === 'error' && e.message.includes('Automatic close skipped') && e.message.includes('Tab 2 is busy'))).toBe(true);
+  });
+
+  it('sanitizes setting updates and only recreates alarms whose interval changed', async () => {
+    const env = makeChrome([makeTab(1, true)]);
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const send = (payload: object) => new Promise<any>(resolve => env.message.handler!(payload, {}, resolve));
+    await send({ type: 'GET_STATE' });
+    expect([...env.alarms.values()]).toEqual([
+      { name: 'adaptive-tab-scan', periodInMinutes: 5 },
+      { name: 'adaptive-tab-boost', periodInMinutes: 30 }
+    ]);
+    env.api.alarms.create.mockClear();
+
+    const { settings } = (await send({ type: 'UPDATE_SETTINGS', settings: { scanMinutes: 0, tabBudget: NaN, batchSize: -3, policy: 'fifo', dryRun: 'no' } })).state;
+    expect(settings).toMatchObject({ scanMinutes: 1, tabBudget: 20, batchSize: 1, policy: 'lru', dryRun: true });
+    expect(env.api.alarms.create).toHaveBeenCalledTimes(1);
+    expect(env.api.alarms.create).toHaveBeenCalledWith('adaptive-tab-scan', { periodInMinutes: 1 });
+
+    env.api.alarms.create.mockClear();
+    await send({ type: 'UPDATE_SETTINGS', settings: { tabBudget: 12 } });
+    expect(env.api.alarms.create).not.toHaveBeenCalled();
+  });
+
+  it('recreates missing alarms, sanitizes saved settings, and trims stored decisions on startup', async () => {
+    const decisions = Array.from({ length: 1000 }, (_, i) => ({ tabId: 1, reason: `r${i}`, at: i }));
+    const saved = { adaptiveTabState: {
+      tabs: {}, settings: { scanMinutes: -5, boostMinutes: 'often', tabBudget: 9999 },
+      events: [], decisions, metrics: { scanDurationsMs: [], restorationLatenciesMs: [] }
+    } };
+    const env = makeChrome([makeTab(1, true)], saved);
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const { state } = await new Promise<any>(resolve => env.message.handler!({ type: 'GET_STATE' }, {}, resolve));
+    expect(state.settings).toMatchObject({ scanMinutes: 1, boostMinutes: 30, tabBudget: 200 });
+    expect(state.decisions).toHaveLength(300);
+    expect(state.decisions[0].reason).toBe('r0');
+    expect(env.alarms.get('adaptive-tab-scan')).toEqual({ name: 'adaptive-tab-scan', periodInMinutes: 1 });
+    expect(env.alarms.get('adaptive-tab-boost')).toEqual({ name: 'adaptive-tab-boost', periodInMinutes: 30 });
+  });
+
+  it('caps the decision log during repeated scans', async () => {
+    const env = makeChrome(Array.from({ length: 12 }, (_, i) => makeTab(i + 1, i === 0)));
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const send = (payload: object) => new Promise<any>(resolve => env.message.handler!(payload, {}, resolve));
+    await send({ type: 'UPDATE_SETTINGS', settings: { batchSize: 10 } });
+    for (let i = 0; i < 40; i++) await send({ type: 'SCAN' });
+    expect((await send({ type: 'GET_STATE' })).state.decisions).toHaveLength(300);
   });
 
   it('reopens in the current window when the original window is gone', async () => {
