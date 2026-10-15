@@ -119,6 +119,59 @@ describe('service worker integration', () => {
     expect(env.api.tabs.remove).toHaveBeenCalledTimes(2);
   });
 
+  it('restores protection reasons during startup recovery', async () => {
+    const pinned = { ...makeTab(2, false), pinned: true };
+    const saved = { adaptiveTabState: {
+      tabs: { 1: { ...makeTab(1, true), createdAt: 1, lastActiveAt: 1, accessCount: 1, focusDurationMs: 0, lifecycle: 'ACTIVE', lifecycleAt: 1, version: 3, referenceBit: false, queue: 0, lastQueueChangeAt: 1, protectionReason: 'Active tab' } },
+      settings: {}, events: [], decisions: [], metrics: { scanDurationsMs: [], restorationLatenciesMs: [] }
+    } };
+    const env = makeChrome([makeTab(1, true), pinned, makeTab(3, false)], saved);
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const { tabs } = (await new Promise<any>(resolve => env.message.handler!({ type: 'GET_STATE' }, {}, resolve))).state;
+    expect(tabs[1].protectionReason).toBe('Active tab');
+    expect(tabs[2].protectionReason).toBe('Pinned tab');
+    expect(tabs[3].protectionReason).toBeUndefined();
+  });
+
+  it('keeps the active tab of other windows active and protected', async () => {
+    const env = makeChrome([makeTab(1, true), makeTab(2, false), { ...makeTab(3, true), windowId: 2 }, { ...makeTab(4, false), windowId: 2 }]);
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const send = (payload: object) => new Promise<any>(resolve => env.message.handler!(payload, {}, resolve));
+    await send({ type: 'GET_STATE' });
+
+    env.tabs[2].active = false;
+    env.tabs[3].active = true;
+    await env.tabActivated.fire({ tabId: 4, windowId: 2 });
+    await flush();
+
+    const { tabs } = (await send({ type: 'GET_STATE' })).state;
+    expect(tabs[1]).toMatchObject({ active: true, protectionReason: 'Active tab' });
+    expect(tabs[3]).toMatchObject({ active: false });
+    expect(tabs[3].protectionReason).toBeUndefined();
+    expect(tabs[4]).toMatchObject({ active: true, protectionReason: 'Active tab' });
+    await send({ type: 'UPDATE_SETTINGS', settings: { batchSize: 10 } });
+    expect((await send({ type: 'SCAN' })).candidates.map((c: { id: number }) => c.id).sort()).toEqual([2, 3]);
+  });
+
+  it('continues an automatic scan when closing one candidate throws', async () => {
+    const env = makeChrome([makeTab(1, true), makeTab(2, false), makeTab(3, false)]);
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const send = (payload: object) => new Promise<any>(resolve => env.message.handler!(payload, {}, resolve));
+    await send({ type: 'UPDATE_SETTINGS', settings: { automatic: true, dryRun: false, tabBudget: 1, batchSize: 2 } });
+
+    env.api.tabs.get.mockRejectedValueOnce(new Error('Tab 2 is busy'));
+    await env.api.alarms.onAlarm.fire({ name: 'adaptive-tab-scan' });
+    await flush();
+
+    expect(env.api.tabs.remove).toHaveBeenCalledTimes(1);
+    expect(env.api.tabs.remove).toHaveBeenCalledWith(3);
+    const state = (await send({ type: 'GET_STATE' })).state;
+    expect(state.events.some((e: { type: string; message: string }) => e.type === 'error' && e.message.includes('Automatic close skipped') && e.message.includes('Tab 2 is busy'))).toBe(true);
+  });
+
   it('reopens in the current window when the original window is gone', async () => {
     const env = makeChrome([makeTab(1, true), makeTab(2, false)]);
     Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
