@@ -1,0 +1,25 @@
+# Architecture and experiment notes
+
+## Runtime flow
+
+Chrome events update a typed metadata record and persist it locally. The periodic alarm requests a scan only when automatic mode is enabled; manual scan returns ranked recommendations. A discard request refreshes the Chrome tab, checks protection and lifecycle, takes a per-tab lock, persists the transition, then closes the tab with `chrome.tabs.remove`. On success the tab's URL, title, window and index are stored in a capped closed-tab list (100 entries) that the dashboard can reopen with `chrome.tabs.create`, falling back to the current window if the original one is gone. On failure the tab returns to `ACTIVE`. Locks are short-lived around the operation and always released. Recovery queries Chrome tabs and reconciles persisted state after worker start.
+
+## Policy semantics
+
+LRU ordering is last activation ascending, then tab ID ascending. Working Set membership is `now - lastActiveAt <= workingSetMs`; oldest outside-window tab wins, otherwise LRU is the explicit fallback. Clock rotates over eligible tab IDs, clearing reference bits while scanning; a clear bit is selected. Tab protection occurs before policy selection. Complexity is O(n) victim selection and O(n) state for the candidate list; the extension tab population is bounded by open tabs.
+
+## Scheduler model
+
+Q0 is active/interactive, Q1 recently active, Q2 background, Q3 idle. Activation promotes to Q0. A configurable idle threshold maps background records to lower-priority queues. A periodic global boost resets queue positions to Q0. Queue changes and boosts are logged. The scheduler is a tab ranking aid, not an OS process scheduler.
+
+## Concurrency and recovery
+
+The worker uses a readiness promise so tab inventory reconciliation runs before messages and observed events mutate state. The readiness promise is reset after recovery failure so a later event can retry. Persisted metadata is merged with Chrome's current tab inventory; closed tabs are dropped and current browser `discarded` state decides whether an interrupted discard is recovered as `DISCARDED` or `ACTIVE`. A per-tab coordinator shares a repeated operation's result, rejects a conflicting operation on that tab, and permits work on other tabs. Its lock is in-memory and only protects the lifetime of one worker instance; persisted transitional state plus Chrome observation handles worker restarts.
+
+## Metrics
+
+Trace hit rate = resident hits / references. Misses include initial page loads and refaults. Evictions count replacements. The fixed-timeout simulation prefers pages beyond a configured inactivity interval and falls back to LRU when full. `none` is an unlimited-residency no-management reference. Belady has future trace knowledge and is a theoretical upper bound for hit rate at the same capacity. Simulated eviction accuracy = (evictions with no re-reference within the configured horizon) / evaluated evictions; avoidable eviction rate = evictions referenced within that horizon / evaluated evictions. Both are undefined when no evictions were evaluated. The live extension records restoration latency from tab activation to Chrome's `status=complete` event, and scan duration from scan start through tab synchronization and selection. It retains the latest 500 samples and reports p50/p95 or mean from those samples. These timings do not indicate website hydration or physical RAM reclaimed. Average/peak RAM requires an OS-level live experiment and must name its sampling source. CPU use is not measured. Simulation outputs must never be presented as physical RAM saved.
+
+## Risks
+
+MV3 service workers stop between events; durable state must be refreshed from actual Chrome tabs at startup. Browser signals for unsaved content and uploads are not reliable. Clock reference bit edits in current selection are persisted at the end of a scan. Automatic scans only evict when resident count exceeds configured budget; below budget they do not preemptively discard.
