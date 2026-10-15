@@ -243,6 +243,46 @@ describe('service worker integration', () => {
     expect(env.api.windows.update).toHaveBeenLastCalledWith(1, { focused: true });
   });
 
+  it('previews Clock candidates without changing reference bits or the hand; an automatic scan applies both', async () => {
+    const env = makeChrome([makeTab(1, true), makeTab(2, false), makeTab(3, false), makeTab(4, false)]);
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const send = (payload: object) => new Promise<any>(resolve => env.message.handler!(payload, {}, resolve));
+    const activate = async (id: number) => { for (const tab of env.tabs) tab.active = tab.id === id; await env.tabActivated.fire({ tabId: id, windowId: 1 }); await flush(); };
+    await send({ type: 'UPDATE_SETTINGS', settings: { policy: 'clock', batchSize: 1 } });
+    await activate(2);
+    await activate(1);
+    expect((await send({ type: 'GET_STATE' })).state.tabs[2].referenceBit).toBe(true);
+
+    for (let i = 0; i < 3; i++) expect((await send({ type: 'SCAN' })).candidates.map((c: { id: number }) => c.id)).toEqual([3]);
+    expect((await send({ type: 'GET_STATE' })).state.tabs[2].referenceBit).toBe(true);
+    await send({ type: 'UPDATE_SETTINGS', settings: { batchSize: 2 } });
+    expect((await send({ type: 'SCAN' })).candidates.map((c: { id: number }) => c.id)).toEqual([3, 4]);
+    expect(env.api.tabs.remove).not.toHaveBeenCalled();
+
+    await send({ type: 'UPDATE_SETTINGS', settings: { automatic: true, dryRun: false, tabBudget: 3, batchSize: 1 } });
+    await env.api.alarms.onAlarm.fire({ name: 'adaptive-tab-scan' });
+    await flush();
+    expect(env.api.tabs.remove).toHaveBeenLastCalledWith(3);
+    expect((await send({ type: 'GET_STATE' })).state.tabs[2].referenceBit).toBe(false);
+
+    await send({ type: 'UPDATE_SETTINGS', settings: { tabBudget: 2 } });
+    await env.api.alarms.onAlarm.fire({ name: 'adaptive-tab-scan' });
+    await flush();
+    expect(env.api.tabs.remove).toHaveBeenLastCalledWith(4);
+  });
+
+  it('writes state to storage once per preview scan', async () => {
+    const env = makeChrome(Array.from({ length: 10 }, (_, i) => makeTab(i + 1, i === 0)));
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const send = (payload: object) => new Promise<any>(resolve => env.message.handler!(payload, {}, resolve));
+    await send({ type: 'GET_STATE' });
+    env.api.storage.local.set.mockClear();
+    await send({ type: 'SCAN' });
+    expect(env.api.storage.local.set).toHaveBeenCalledTimes(1);
+  });
+
   it('reopens in the current window when the original window is gone', async () => {
     const env = makeChrome([makeTab(1, true), makeTab(2, false)]);
     Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });

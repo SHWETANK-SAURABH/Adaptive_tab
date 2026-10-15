@@ -6,7 +6,7 @@ Chrome events update a typed metadata record and persist it locally. The periodi
 
 ## Policy semantics
 
-LRU ordering is last activation ascending, then tab ID ascending. Working Set membership is `now - lastActiveAt <= workingSetMs`; oldest outside-window tab wins, otherwise LRU is the explicit fallback. Clock rotates over eligible tab IDs, clearing reference bits while scanning; a clear bit is selected. Tab protection occurs before policy selection. Complexity is O(n) victim selection and O(n) state for the candidate list; the extension tab population is bounded by open tabs.
+LRU ordering is last activation ascending, then tab ID ascending. Working Set membership is `now - lastActiveAt <= workingSetMs`; oldest outside-window tab wins, otherwise LRU is the explicit fallback. Clock rotates over eligible tab IDs in ascending order, starting just after the ID it last selected, and selects the first tab with a clear reference bit; if every bit is set, a full sweep clears them all and the hand's starting tab is selected. Policies never mutate their inputs: a selection reports the reference bits it cleared and a `commit` that advances the hand. A scan applies both only when it actually closes tabs (automatic mode with dry run off); previews run on a forked policy and copies of the tab records, so they show what a real scan would choose without changing state. The trace evaluator uses a fresh Clock per replay. Tab protection occurs before policy selection. Complexity is O(n) victim selection and O(n) state for the candidate list; the extension tab population is bounded by open tabs.
 
 ## Scheduler model
 
@@ -22,4 +22,4 @@ Trace hit rate = resident hits / references. Misses include initial page loads a
 
 ## Risks
 
-MV3 service workers stop between events; durable state must be refreshed from actual Chrome tabs at startup. Browser signals for unsaved content and uploads are not reliable. Clock reference bit edits in current selection are persisted at the end of a scan. Automatic scans only evict when resident count exceeds configured budget; below budget they do not preemptively discard.
+MV3 service workers stop between events; durable state must be refreshed from actual Chrome tabs at startup. Browser signals for unsaved content and uploads are not reliable. A scan refreshes every tab from Chrome and writes state to storage once at the end (closing a tab still persists its transition immediately). Automatic scans only evict when resident count exceeds configured budget; below budget they do not preemptively discard.
