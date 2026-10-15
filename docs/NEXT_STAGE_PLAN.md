@@ -33,7 +33,7 @@ Make per-tab operations idempotent within a service-worker lifetime and make sta
 - [x] Recovery reconciles live tabs, removes closed tabs, and resolves interrupted lifecycle states.
 - [x] Unit coverage for duplicate/conflicting operations, failure cleanup, and restart reconciliation.
 - [x] Unit tests and production build pass.
-- [ ] Browser-backed tests for real Chrome event ordering and service-worker termination.
+- [x] Browser-backed tests for real Chrome event ordering and service-worker termination (`npm run test:e2e`).
 
 ## Follow-on stage
 
@@ -46,5 +46,5 @@ The measurement follow-on is implemented below. Mocked service-worker integratio
 - [x] Calculate simulated avoidable-eviction rate and eviction accuracy using an explicit future-reference horizon.
 - [x] Surface live latency and scan timing summaries in Analytics and label the endpoint.
 - [x] Add mocked service-worker integration coverage for tab operations, settings persistence, and recovery.
-- [ ] Verify real Chrome event ordering and service-worker termination in a browser-backed run.
-- [ ] Measure system memory and CPU overhead in a documented real-browser experiment.
+- [x] Verify real Chrome event ordering and service-worker termination in a browser-backed run. This found that Chrome replaces discarded tabs with new ids; `tabs.onReplaced` is now handled.
+- [x] Measure system memory and CPU overhead in a documented real-browser experiment (`npm run measure`, [MEASUREMENTS.md](MEASUREMENTS.md)).

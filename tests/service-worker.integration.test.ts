@@ -20,6 +20,7 @@ function makeChrome(tabs: ReturnType<typeof makeTab>[], storage: Record<string, 
   const tabActivated = makeEvent();
   const tabUpdated = makeEvent();
   const tabRemoved = makeEvent();
+  const tabReplaced = makeEvent();
   const alarmEvent = makeEvent();
   const installed = makeEvent();
   const startup = makeEvent();
@@ -39,7 +40,7 @@ function makeChrome(tabs: ReturnType<typeof makeTab>[], storage: Record<string, 
       set: vi.fn(async (values: Record<string, unknown>) => { for (const [key, value] of Object.entries(values)) data.set(key, copy(value)); })
     } },
     tabs: {
-      onCreated: tabCreated, onActivated: tabActivated, onUpdated: tabUpdated, onRemoved: tabRemoved,
+      onCreated: tabCreated, onActivated: tabActivated, onUpdated: tabUpdated, onRemoved: tabRemoved, onReplaced: tabReplaced,
       query: vi.fn(async () => copy(tabs)),
       get: vi.fn(async (id: number) => { const found = tabs.find(tab => tab.id === id); if (!found) throw new Error('No tab'); return copy(found); }),
       discard: vi.fn(async (id: number) => { const found = tabs.find(tab => tab.id === id); if (!found) throw new Error('No tab'); found.discarded = true; found.active = false; }),
@@ -53,7 +54,7 @@ function makeChrome(tabs: ReturnType<typeof makeTab>[], storage: Record<string, 
       update: vi.fn(async (id: number, changes: { active?: boolean }) => { const found = tabs.find(tab => tab.id === id); if (!found) throw new Error('No tab'); if (changes.active) { for (const tab of tabs) tab.active = false; found.active = true; } return copy(found); })
     }
   };
-  return { api, tabs, data, alarms, message, tabActivated, tabUpdated, tabRemoved, installed, startup };
+  return { api, tabs, data, alarms, message, tabActivated, tabUpdated, tabRemoved, tabReplaced, installed, startup };
 }
 
 async function flush() { for (let i = 0; i < 5; i++) await new Promise(resolve => setTimeout(resolve, 0)); }
@@ -281,6 +282,26 @@ describe('service worker integration', () => {
     env.api.storage.local.set.mockClear();
     await send({ type: 'SCAN' });
     expect(env.api.storage.local.set).toHaveBeenCalledTimes(1);
+  });
+
+  it('moves a tab record to its new id when Chrome replaces the tab on discard', async () => {
+    const env = makeChrome([makeTab(1, true), makeTab(2, false)]);
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const send = (payload: object) => new Promise<any>(resolve => env.message.handler!(payload, {}, resolve));
+    const before = (await send({ type: 'GET_STATE' })).state.tabs[2];
+
+    // Chrome assigns the discarded tab a new id; onUpdated for the new id may arrive before onReplaced.
+    Object.assign(env.tabs[1], { id: 3, discarded: true });
+    await env.tabUpdated.fire(3, { discarded: true }, copy(env.tabs[1]));
+    await flush();
+    await env.tabReplaced.fire(3, 2);
+    await flush();
+
+    const { tabs, events } = (await send({ type: 'GET_STATE' })).state;
+    expect(tabs[2]).toBeUndefined();
+    expect(tabs[3]).toMatchObject({ id: 3, createdAt: before.createdAt, accessCount: before.accessCount, discarded: true, lifecycle: 'DISCARDED' });
+    expect(events[0]).toMatchObject({ type: 'replaced', tabId: 3 });
   });
 
   it('reopens in the current window when the original window is gone', async () => {
