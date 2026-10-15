@@ -28,6 +28,7 @@ function makeChrome(tabs: ReturnType<typeof makeTab>[], storage: Record<string, 
   const alarms = new Map<string, { name: string; periodInMinutes?: number }>();
   const api = {
     runtime: { onInstalled: installed, onStartup: startup, onMessage: message },
+    windows: { update: vi.fn(async (windowId: number, info: { focused?: boolean }) => ({ id: windowId, ...info })) },
     alarms: {
       create: vi.fn(async (name: string, info: { periodInMinutes?: number }) => { alarms.set(name, { name, ...info }); }),
       get: vi.fn(async (name: string) => alarms.get(name)),
@@ -224,6 +225,22 @@ describe('service worker integration', () => {
     await send({ type: 'UPDATE_SETTINGS', settings: { batchSize: 10 } });
     for (let i = 0; i < 40; i++) await send({ type: 'SCAN' });
     expect((await send({ type: 'GET_STATE' })).state.decisions).toHaveLength(300);
+  });
+
+  it('brings the window to the front when restoring or reopening a tab', async () => {
+    const env = makeChrome([makeTab(1, true), { ...makeTab(2, false), windowId: 2, discarded: true }, makeTab(3, false)]);
+    Object.defineProperty(globalThis, 'chrome', { configurable: true, value: env.api });
+    await import('../src/background/service-worker');
+    const send = (payload: object) => new Promise<any>(resolve => env.message.handler!(payload, {}, resolve));
+
+    expect((await send({ type: 'RESTORE', tabId: 2 })).success).toBe(true);
+    expect(env.api.windows.update).toHaveBeenLastCalledWith(2, { focused: true });
+
+    await send({ type: 'DISCARD', tabId: 3 });
+    const { closed } = (await send({ type: 'GET_STATE' })).state;
+    env.api.windows.update.mockRejectedValueOnce(new Error('No window with id: 1.'));
+    expect((await send({ type: 'REOPEN', key: closed[0].key })).success).toBe(true);
+    expect(env.api.windows.update).toHaveBeenLastCalledWith(1, { focused: true });
   });
 
   it('reopens in the current window when the original window is gone', async () => {
